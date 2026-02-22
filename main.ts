@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 
+// 全局状态：记录选人信息和在线人数
 let state = {
   turn: 0,
   selected: {} as Record<string, string>,
@@ -7,12 +8,16 @@ let state = {
   onlineUsers: 0,
 };
 
+// 存储所有实时连接的用户
 const sockets = new Set<WebSocket>();
 
+// 启动服务，自动适配 Deno Deploy 的端口规则
 serve((req) => {
+  // 处理实时通信
   if (req.headers.get("upgrade") === "websocket") {
     const { socket, response } = Deno.upgradeWebSocket(req);
 
+    // 新用户加入
     socket.onopen = () => {
       state.onlineUsers++;
       sockets.add(socket);
@@ -20,10 +25,12 @@ serve((req) => {
       socket.send(JSON.stringify({ type: "state", state }));
     };
 
+    // 收到用户的选人操作
     socket.onmessage = (e) => {
       const data = JSON.parse(e.data);
       if (data.type === "update") {
         state = { ...state, ...data.state };
+        // 把更新同步给所有人
         sockets.forEach((s) => {
           if (s.readyState === WebSocket.OPEN) {
             s.send(JSON.stringify({ type: "state", state }));
@@ -32,6 +39,7 @@ serve((req) => {
       }
     };
 
+    // 用户离开
     socket.onclose = () => {
       state.onlineUsers--;
       sockets.delete(socket);
@@ -41,11 +49,13 @@ serve((req) => {
     return response;
   }
 
+  // 提供前端页面
   return new Response(frontendHTML, {
     headers: { "Content-Type": "text/html; charset=utf-8" },
   });
 }, { port: Deno.env.get("PORT") ? Number(Deno.env.get("PORT")) : 8000 });
 
+// 广播在线人数
 function broadcastOnlineCount() {
   sockets.forEach((s) => {
     if (s.readyState === WebSocket.OPEN) {
@@ -54,6 +64,7 @@ function broadcastOnlineCount() {
   });
 }
 
+// 前端页面代码，无需修改
 const frontendHTML = `
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -113,6 +124,7 @@ let state = {
   onlineUsers: 0
 };
 
+// 连接实时服务
 const ws = new WebSocket(\`wss://\${window.location.host}\`);
 ws.onopen = () => {};
 ws.onmessage = (e) => {
@@ -127,10 +139,12 @@ ws.onmessage = (e) => {
   }
 };
 
+// 更新在线人数显示
 function renderOnlineCount() {
   document.getElementById('online_count').innerText = \`当前在线：\${state.onlineUsers}人\`;
 }
 
+// 渲染页面内容
 function render(){
   renderOnlineCount();
   document.getElementById('current_leader').innerText = leaders[state.turn];
@@ -156,6 +170,7 @@ function render(){
   });
 }
 
+// 选人操作逻辑
 function pick(e){
   const name = e.target.innerText;
   if(state.selected[name]) return;
@@ -170,6 +185,7 @@ function pick(e){
     state.turn = 0;
   }
 
+  // 同步操作到所有用户
   ws.send(JSON.stringify({type:'update', state: {
     turn: state.turn,
     selected: state.selected,
@@ -178,6 +194,7 @@ function pick(e){
   render();
 }
 
+// 页面初始化
 render();
 </script>
 </body>

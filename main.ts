@@ -1,47 +1,45 @@
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-
-// 全局状态：记录选人信息和在线人数
-let state = {
+const state = {
   turn: 0,
-  selected: {} as Record<string, string>,
+  selected: {},
   direction: 1,
-  onlineUsers: 0,
+  onlineUsers: 0
 };
 
-// 存储所有实时连接的用户
-const sockets = new Set<WebSocket>();
+const sockets = new Set();
 
-// 启动服务，自动适配 Deno Deploy 的端口规则
-serve((req) => {
-  // 处理实时通信
-  if (req.headers.get("upgrade") === "websocket") {
+function broadcastOnlineCount() {
+  const msg = JSON.stringify({
+    type: "onlineCount",
+    count: sockets.size
+  });
+  for (const ws of sockets) {
+    try { ws.send(msg); } catch {}
+  }
+}
+
+function handler(req) {
+  const upgrade = req.headers.get("upgrade");
+  if (upgrade === "websocket") {
     const { socket, response } = Deno.upgradeWebSocket(req);
+    sockets.add(socket);
+    broadcastOnlineCount();
 
-    // 新用户加入
-    socket.onopen = () => {
-      state.onlineUsers++;
-      sockets.add(socket);
-      broadcastOnlineCount();
-      socket.send(JSON.stringify({ type: "state", state }));
-    };
-
-    // 收到用户的选人操作
     socket.onmessage = (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === "update") {
-        state = { ...state, ...data.state };
-        // 把更新同步给所有人
-        sockets.forEach((s) => {
-          if (s.readyState === WebSocket.OPEN) {
-            s.send(JSON.stringify({ type: "state", state }));
-          }
-        });
-      }
+      try {
+        const data = JSON.parse(e.data);
+        if (data.type === "update") {
+          state.turn = data.state.turn;
+          state.selected = data.state.selected;
+          state.direction = data.state.direction;
+        }
+        const all = JSON.stringify({ type: "state", state });
+        for (const ws of sockets) {
+          try { ws.send(all); } catch {}
+        }
+      } catch {}
     };
 
-    // 用户离开
     socket.onclose = () => {
-      state.onlineUsers--;
       sockets.delete(socket);
       broadcastOnlineCount();
     };
@@ -49,64 +47,40 @@ serve((req) => {
     return response;
   }
 
-  // 提供前端页面
-  return new Response(frontendHTML, {
-    headers: { "Content-Type": "text/html; charset=utf-8" },
-  });
-}, { port: Deno.env.get("PORT") ? Number(Deno.env.get("PORT")) : 8000 });
-
-// 广播在线人数
-function broadcastOnlineCount() {
-  sockets.forEach((s) => {
-    if (s.readyState === WebSocket.OPEN) {
-      s.send(JSON.stringify({ type: "onlineCount", count: state.onlineUsers }));
-    }
-  });
-}
-
-// 前端页面代码，无需修改
-const frontendHTML = `
-<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>班级实时选人系统</title>
+<title>选人系统</title>
 <style>
-  *{box-sizing:border-box;font-family:Arial,sans-serif}
-  body{max-width:1000px;margin:0 auto;padding:20px;background:#f5f7fa}
-  h1,h2{text-align:center}
-  .online-count{text-align:center;font-size:18px;font-weight:bold;color:#0d6efd;margin-bottom:10px}
-  .box{background:white;padding:20px;border-radius:12px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
-  .leaders{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
-  .leader{padding:10px 16px;border-radius:8px;background:#e3f2fd;font-weight:bold}
-  .now{background:#0d6efd;color:white}
-  .users{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:10px}
-  .user{padding:10px;background:#eee;border-radius:6px;text-align:center;cursor:pointer}
-  .user.selected{background:#ccc;text-decoration:line-through;pointer-events:none}
-  .tip{text-align:center;color:#666}
+*{box-sizing:border-box;font-family:Arial,sans-serif}
+body{max-width:1000px;margin:0 auto;padding:20px;background:#f5f7fa}
+h1,h2{text-align:center}
+.online{text-align:center;font-size:18px;color:#0d6efd}
+.box{background:white;padding:20px;border-radius:12px;margin:16px 0;box-shadow:0 2px 8px #0001}
+.leaders{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.leader{padding:10px 16px;background:#e3f2fd;border-radius:8px}
+.leader.now{background:#0d6efd;color:white}
+.users{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-top:10px}
+.user{padding:10px;background:#eee;border-radius:6px;cursor:pointer}
+.user.selected{background:#ccc;text-decoration:line-through}
 </style>
 </head>
 <body>
-
-<div class="online-count" id="online_count">当前在线：0人</div>
-
+<div class="online">在线人数：<span id="num">0</span></div>
 <h1>班级分组选人系统</h1>
-<p class="tip">实时同步｜7位组长｜蛇形顺序</p>
-
 <div class="box">
-  <h2>当前轮到：<span id="current_leader"></span></h2>
-  <div id="leader_list" class="leaders"></div>
+  <h2>当前轮到：<span id="current"></span></h2>
+  <div class="leaders" id="leaders"></div>
 </div>
-
 <div class="box">
   <h2>候选人</h2>
-  <div id="user_list" class="users"></div>
+  <div class="users" id="users"></div>
 </div>
-
 <script>
 const leaders = ["1","2","3","4","5","6","7"];
-const users = [
+const names = [
 "胡嘉慧","李金柳","梁丽雯","廖庆烨","梁爽","苏雯慧","杨惠婷",
 "陈杜娟","陈桦婷","邓吉定","范莉莉","甘微微","甘志青",
 "黄春策","黄庆烽","黄绍恒","黄永棣","黄雨珊","黄梓煜",
@@ -117,86 +91,44 @@ const users = [
 "韦云凌","谢天龙","谢钰华","杨思涵","周芳泽","周俊宇"
 ];
 
-let state = {
-  turn: 0,
-  selected: {},
-  direction: 1,
-  onlineUsers: 0
-};
+const ws = new WebSocket(location.origin.replace(/^http/, 'ws'));
+let state = { turn:0, selected:{}, direction:1 };
 
-// 连接实时服务
-const ws = new WebSocket(\`wss://\${window.location.host}\`);
-ws.onopen = () => {};
-ws.onmessage = (e) => {
-  const data = JSON.parse(e.data);
-  if(data.type === 'state') {
-    state = { ...state, ...data.state };
-    render();
-  }
-  if(data.type === 'onlineCount') {
-    state.onlineUsers = data.count;
-    renderOnlineCount();
-  }
-};
+function render() {
+  document.getElementById("current").textContent = leaders[state.turn];
+  const leadersEl = document.getElementById("leaders");
+  leadersEl.innerHTML = leaders.map((x,i) =>
+    \`<div class="leader \${i===state.turn?'now':''}">\${x}</div>\`
+  ).join("");
 
-// 更新在线人数显示
-function renderOnlineCount() {
-  document.getElementById('online_count').innerText = \`当前在线：\${state.onlineUsers}人\`;
+  const usersEl = document.getElementById("users");
+  usersEl.innerHTML = names.map(name =>
+    \`<div class="user \${state.selected[name]?'selected':''}" onclick="pick('\${name}')">\${name}</div>\`
+  ).join("");
 }
 
-// 渲染页面内容
-function render(){
-  renderOnlineCount();
-  document.getElementById('current_leader').innerText = leaders[state.turn];
-  
-  const leaderEl = document.getElementById('leader_list');
-  leaderEl.innerHTML = '';
-  leaders.forEach((n,i)=>{
-    const div = document.createElement('div');
-    div.className = 'leader ' + (i===state.turn?'now':'');
-    div.innerText = n;
-    leaderEl.appendChild(div);
-  });
-
-  const userEl = document.getElementById('user_list');
-  userEl.innerHTML = '';
-  users.forEach(name=>{
-    const div = document.createElement('div');
-    const sel = !!state.selected[name];
-    div.className = 'user ' + (sel?'selected':'');
-    div.innerText = name;
-    if(!sel) div.onclick = pick;
-    userEl.appendChild(div);
-  });
-}
-
-// 选人操作逻辑
-function pick(e){
-  const name = e.target.innerText;
-  if(state.selected[name]) return;
+function pick(name) {
+  if (state.selected[name]) return;
   state.selected[name] = leaders[state.turn];
-  
   state.turn += state.direction;
-  if(state.turn >= leaders.length){
-    state.direction = -1;
-    state.turn = leaders.length-1;
-  }else if(state.turn < 0){
-    state.direction = 1;
-    state.turn = 0;
-  }
-
-  // 同步操作到所有用户
-  ws.send(JSON.stringify({type:'update', state: {
-    turn: state.turn,
-    selected: state.selected,
-    direction: state.direction
-  }}));
-  render();
+  if (state.turn >= leaders.length) { state.direction = -1; state.turn = leaders.length-1; }
+  if (state.turn < 0) { state.direction = 1; state.turn = 0; }
+  ws.send(JSON.stringify({type:"update", state}));
 }
 
-// 页面初始化
-render();
+ws.onmessage = e => {
+  const data = JSON.parse(e.data);
+  if (data.type === "state") state = data.state;
+  if (data.type === "onlineCount") document.getElementById("num").textContent = data.count;
+  render();
+};
 </script>
 </body>
-</html>
-`;
+</html>`;
+
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8" }
+  });
+}
+
+Deno.serve(handler);
